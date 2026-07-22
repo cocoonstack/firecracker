@@ -1,0 +1,83 @@
+name: Build and Release Dev
+
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dev-release
+  cancel-in-progress: true
+
+env:
+  # Pinned so an upstream devctr bump lands as a visible diff, never a silent rebuild.
+  DEVCTR_IMAGE_TAG: v92
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Build firecracker (release, static musl)
+        run: ./tools/devtool -y build --release
+
+      - name: Stage artifacts
+        run: |
+          set -euo pipefail
+          built=build/cargo_target/x86_64-unknown-linux-musl/release
+          mkdir -p dist
+          for bin in firecracker jailer; do
+            cp -v "$built/$bin" "dist/$bin-x86_64"
+            cp -v "$built/$bin.debug" "dist/$bin-x86_64.debug"
+          done
+          cp -v LICENSE NOTICE THIRD-PARTY dist/
+          # Doubles as a smoke test: the static binary has to run on the bare runner.
+          file dist/firecracker-x86_64 | grep -qE 'static-pie linked|statically linked'
+          version=$(./dist/firecracker-x86_64 --version | head -1 | awk '{print $2}')
+          cat > dist/build-info.json <<EOF
+          {
+            "version": "${version}",
+            "ref": "${GITHUB_REF_NAME}",
+            "commit": "${GITHUB_SHA}",
+            "run_id": "${GITHUB_RUN_ID}",
+            "run_attempt": "${GITHUB_RUN_ATTEMPT}",
+            "workflow": "${GITHUB_WORKFLOW}",
+            "devctr_image_tag": "${DEVCTR_IMAGE_TAG}"
+          }
+          EOF
+          (cd dist && find . -type f -not -name SHA256SUMS | sort | xargs sha256sum > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Upload binaries as artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: firecracker-dev-x86_64
+          path: dist/
+
+      - name: Create dev release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev
+          target_commitish: ${{ github.sha }}
+          name: Dev Build
+          body: |
+            Branch: `${{ github.ref_name }}`
+            Commit: `${{ github.sha }}`
+            Workflow Run: `${{ github.run_id }}`
+          files: dist/*
+          prerelease: true
+          make_latest: false
+          overwrite_files: true
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Move dev tag to current commit
+        run: |
+          git tag -f dev "${GITHUB_SHA}"
+          git push origin refs/tags/dev --force
