@@ -68,6 +68,8 @@ jobs:
         run: |
           set -euo pipefail
           cp -v LICENSE NOTICE THIRD-PARTY dist/
+          # The artifact round-trip drops the executable bit.
+          chmod +x dist/*-x86_64 dist/*-aarch64
           version=$(./dist/firecracker-x86_64 --version | head -1 | awk '{print $2}')
           cat > dist/build-info.json <<EOF
           {
