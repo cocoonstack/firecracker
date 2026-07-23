@@ -1,0 +1,109 @@
+name: Build and Release Dev
+
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dev-release
+  cancel-in-progress: true
+
+env:
+  # Pinned so an upstream devctr bump lands as a visible diff, never a silent rebuild.
+  DEVCTR_IMAGE_TAG: v92
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build firecracker (release, static musl)
+        run: ./tools/devtool -y build --release
+
+      - name: Stage artifacts
+        run: |
+          set -euo pipefail
+          built=build/cargo_target/${{ matrix.arch }}-unknown-linux-musl/release
+          mkdir -p dist
+          for bin in firecracker jailer; do
+            cp -v "$built/$bin" "dist/$bin-${{ matrix.arch }}"
+            cp -v "$built/$bin.debug" "dist/$bin-${{ matrix.arch }}.debug"
+          done
+          # Doubles as a smoke test: the static binary has to run on the bare runner.
+          file "dist/firecracker-${{ matrix.arch }}" | grep -qE 'static-pie linked|statically linked'
+          ./dist/firecracker-${{ matrix.arch }} --version
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.arch }}
+          path: dist/
+
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      - name: Add provenance and checksums
+        run: |
+          set -euo pipefail
+          cp -v LICENSE NOTICE THIRD-PARTY dist/
+          # The artifact round-trip drops the executable bit.
+          chmod +x dist/*-x86_64 dist/*-aarch64
+          version=$(./dist/firecracker-x86_64 --version | awk 'NR==1 {v=$2} END {print v}')
+          cat > dist/build-info.json <<EOF
+          {
+            "version": "${version}",
+            "ref": "${GITHUB_REF_NAME}",
+            "commit": "${GITHUB_SHA}",
+            "run_id": "${GITHUB_RUN_ID}",
+            "run_attempt": "${GITHUB_RUN_ATTEMPT}",
+            "workflow": "${GITHUB_WORKFLOW}",
+            "devctr_image_tag": "${DEVCTR_IMAGE_TAG}"
+          }
+          EOF
+          (cd dist && find . -type f -not -name SHA256SUMS | sort | xargs sha256sum > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Create dev release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: dev
+          target_commitish: ${{ github.sha }}
+          name: Dev Build
+          body: |
+            Branch: `${{ github.ref_name }}`
+            Commit: `${{ github.sha }}`
+            Workflow Run: `${{ github.run_id }}`
+          files: dist/*
+          prerelease: true
+          make_latest: false
+          overwrite_files: true
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Move dev tag to current commit
+        run: |
+          git tag -f dev "${GITHUB_SHA}"
+          git push origin refs/tags/dev --force
