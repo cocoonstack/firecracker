@@ -27,7 +27,7 @@ jobs:
             arch: aarch64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Build firecracker (release, static musl)
         run: ./tools/devtool -y build --release
@@ -54,11 +54,11 @@ jobs:
     needs: build
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: dist-*
           merge-multiple: true
@@ -86,7 +86,7 @@ jobs:
           cat dist/SHA256SUMS
 
       - name: Create dev release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: dev
           target_commitish: ${{ github.sha }}
